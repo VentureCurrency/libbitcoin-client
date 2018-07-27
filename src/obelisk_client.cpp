@@ -35,7 +35,7 @@ static uint32_t to_milliseconds(uint16_t seconds)
 {
     const auto milliseconds = static_cast<uint32_t>(seconds) * 1000;
     return std::min(milliseconds, max_uint32);
-};
+}
 
 static const auto on_unknown = [](const std::string&){};
 
@@ -50,16 +50,22 @@ static const auto on_unknown = [](const std::string&){};
 
 // Retries is overloaded as configuration for resends as well.
 // Timeout is capped at ~ 25 days by signed/millsecond conversions.
-obelisk_client::obelisk_client(uint16_t timeout_seconds, uint8_t retries)
+obelisk_client::obelisk_client(uint16_t timeout_seconds, uint8_t retries,
+    const bc::settings& bitcoin_settings)
   : socket_(context_, zmq::socket::role::dealer),
+    block_socket_(context_, zmq::socket::role::subscriber),
+    transaction_socket_(context_, zmq::socket::role::subscriber),
     stream_(socket_),
     retries_(retries),
-    proxy(stream_, on_unknown, to_milliseconds(timeout_seconds), retries)
+    bitcoin_settings_(bitcoin_settings),
+    proxy(stream_, on_unknown, to_milliseconds(timeout_seconds), retries,
+        bitcoin_settings)
 {
 }
 
-obelisk_client::obelisk_client(const connection_type& channel)
-  : obelisk_client(channel.timeout_seconds, channel.retries)
+obelisk_client::obelisk_client(const connection_type& channel,
+    const bc::settings& bitcoin_settings)
+  : obelisk_client(channel.timeout_seconds, channel.retries, bitcoin_settings)
 {
 }
 
@@ -124,7 +130,34 @@ void obelisk_client::wait()
     clear(error::channel_timeout);
 }
 
-// Used by watch-* commands, fires registered update or unknown handlers.
+bool obelisk_client::subscribe_block(const config::endpoint& address,
+    block_update_handler on_update)
+{
+    const auto host_address = address.to_string();
+    if (block_socket_.connect(host_address) == error::success)
+    {
+        on_block_update_ = on_update;
+        return true;
+    }
+
+    return false;
+}
+
+bool obelisk_client::subscribe_transaction(
+    const config::endpoint& address, transaction_update_handler on_update)
+{
+    const auto host_address = address.to_string();
+    if (transaction_socket_.connect(host_address) == error::success)
+    {
+        on_transaction_update_ = on_update;
+        return true;
+    }
+
+    return false;
+}
+
+// Used by watch-* and subscribe-* commands, fires registered update
+// or unknown handlers.
 void obelisk_client::monitor(uint32_t timeout_seconds)
 {
     const auto deadline = asio::steady_clock::now() +
@@ -132,11 +165,54 @@ void obelisk_client::monitor(uint32_t timeout_seconds)
 
     zmq::poller poller;
     poller.add(socket_);
+    poller.add(block_socket_);
+    poller.add(transaction_socket_);
     auto delay = remaining(deadline);
 
-    while (poller.wait(delay).contains(socket_.id()))
+    while (delay > 0)
     {
-        stream_.read(*this);
+        const auto identifiers = poller.wait(delay);
+        if (identifiers.contains(socket_.id()))
+        {
+            stream_.read(*this);
+        }
+
+        if (identifiers.contains(block_socket_.id()))
+        {
+            zmq::message message;
+            uint16_t sequence;
+            uint32_t height;
+            data_chunk data;
+
+            block_socket_.receive(message);
+
+            message.dequeue(sequence);
+            message.dequeue(height);
+            message.dequeue(data);
+
+            bc::chain::block block(bitcoin_settings_);
+            block.from_data(data, true);
+
+            on_block_update_(block);
+        }
+
+        if (identifiers.contains(transaction_socket_.id()))
+        {
+            zmq::message message;
+            uint16_t sequence;
+            data_chunk data;
+
+            transaction_socket_.receive(message);
+
+            message.dequeue(sequence);
+            message.dequeue(data);
+
+            bc::chain::transaction transaction;
+            transaction.from_data(data, true, true);
+
+            on_transaction_update_(transaction);
+        }
+
         delay = remaining(deadline);
     }
 }

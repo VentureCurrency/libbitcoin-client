@@ -20,6 +20,7 @@
 #define LIBBITCOIN_CLIENT_OBELISK_CLIENT_HPP
 
 #include <cstdint>
+#include <bitcoin/bitcoin.hpp>
 #include <bitcoin/protocol.hpp>
 #include <bitcoin/client/define.hpp>
 #include <bitcoin/client/proxy.hpp>
@@ -34,6 +35,8 @@ struct BCC_API connection_type
     uint8_t retries;
     uint16_t timeout_seconds;
     config::endpoint server;
+    config::endpoint block_server;
+    config::endpoint transaction_server;
     config::authority socks;
     config::sodium server_public_key;
     config::sodium client_private_key;
@@ -44,11 +47,17 @@ class BCC_API obelisk_client
   : public proxy
 {
 public:
+    typedef std::function<void(const chain::block&)> block_update_handler;
+    typedef std::function<void(const chain::transaction&)>
+        transaction_update_handler;
+
     /// Construct an instance of the client using timeout/retries from channel.
-    obelisk_client(const connection_type& channel);
+    obelisk_client(const connection_type& channel,
+        const bc::settings& bitcoin_settings);
 
     /// Construct an instance of the client using the specified parameters.
-    obelisk_client(uint16_t timeout_seconds, uint8_t retries);
+    obelisk_client(uint16_t timeout_seconds, uint8_t retries,
+        const bc::settings& bitcoin_settings);
 
     /// Connect to the specified endpoint using the provided keys.
     virtual bool connect(const config::endpoint& address,
@@ -65,14 +74,25 @@ public:
     /// Wait for server to respond, until timeout.
     void wait();
 
+    bool subscribe_block(const config::endpoint& address,
+        block_update_handler on_update);
+
+    bool subscribe_transaction(const config::endpoint& address,
+        transaction_update_handler on_update);
+
     /// Monitor for subscription notifications, until timeout.
     void monitor(uint32_t timeout_seconds);
 
 private:
     protocol::zmq::context context_;
     protocol::zmq::socket socket_;
+    protocol::zmq::socket block_socket_;
+    protocol::zmq::socket transaction_socket_;
+    block_update_handler on_block_update_;
+    transaction_update_handler on_transaction_update_;
     socket_stream stream_;
     const uint8_t retries_;
+    const bc::settings& bitcoin_settings_;
 };
 
 } // namespace client
